@@ -179,3 +179,38 @@ class DiagnosticTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(EmailDeliveryError):
                     await SMTPEmailSender().send_verification("buyer@example.com", TOKEN)
             self.assert_safe_record(logs.records[0], "submission", "SMTPDataError", "failed")
+
+
+class PasswordResetDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reset_message_reuses_config_tls_and_fragment_link(self):
+        with patch.dict(os.environ, ENV, clear=True), patch("email_delivery.smtplib.SMTP") as factory:
+            smtp = factory.return_value.__enter__.return_value
+            smtp.send_message.return_value = {}
+            await SMTPEmailSender().send_password_reset("buyer@example.com", TOKEN)
+            message = smtp.send_message.call_args.args[0]
+            link = urlsplit(message.get_content().splitlines()[1])
+            self.assertEqual(link.query, "")
+            self.assertTrue(link.fragment == "reset-password=" + TOKEN)
+            self.assertEqual(message["Subject"], "Reset your TexTech password")
+            self.assertIn("30 minutes after it was issued", message.get_content())
+            smtp.starttls.assert_called_once()
+            smtp.login.assert_called_once_with("example-user", "test-secret")
+            self.assertEqual(factory.call_args.kwargs["timeout"], 10)
+
+    async def test_reset_submission_and_cleanup_semantics_and_safe_diagnostics(self):
+        for failure, expected in ((smtplib.SMTPDataError(550, b"private"), EmailDeliveryError),
+                                  (smtplib.SMTPServerDisconnected("private"), EmailSubmissionUncertain)):
+            with patch.dict(os.environ, ENV, clear=True), patch("email_delivery.smtplib.SMTP") as factory, self.assertLogs("email_delivery", level="WARNING") as logs:
+                smtp = factory.return_value.__enter__.return_value
+                smtp.send_message.side_effect = failure
+                with self.assertRaises(expected) as error:
+                    await SMTPEmailSender().send_password_reset("buyer@example.com", TOKEN)
+                self.assertNotIn("private", str(error.exception))
+            output = " ".join(logs.output)
+            self.assertNotIn("private", output)
+            self.assertNotIn(TOKEN, output)
+            self.assertNotIn("buyer@example.com", output)
+        with patch.dict(os.environ, ENV, clear=True), patch("email_delivery.smtplib.SMTP") as factory:
+            factory.return_value.__enter__.return_value.send_message.return_value = {}
+            factory.return_value.__exit__.side_effect = smtplib.SMTPServerDisconnected("private")
+            await SMTPEmailSender().send_password_reset("buyer@example.com", TOKEN)

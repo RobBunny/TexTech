@@ -2,15 +2,16 @@
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, TypeAdapter, ValidationError
 from pwdlib import PasswordHash
 from pymongo.errors import ConnectionFailure, DuplicateKeyError, OperationFailure
 
 from database import client, users_collection
-from email_delivery import EmailDeliveryError, EmailSubmissionUncertain, SMTPEmailSender
-from email_verification import create_token_fields, verify_email
+from email_delivery import EmailDeliveryError, EmailSubmissionUncertain, SMTPEmailSender, _log_failure
+from email_verification import create_token_fields, verify_email, TOKEN_PATTERN
+from password_reset import issue_password_reset, reset_password, TOKEN_INDEX_NAME as RESET_TOKEN_INDEX_NAME
 
 
 password_hash = PasswordHash.recommended()
@@ -34,6 +35,13 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(
                 "Verification token uniqueness index initialization failed; API startup aborted"
             ) from None
+        try:
+            await users_collection.create_index(
+                "password_reset_token_hash", name=RESET_TOKEN_INDEX_NAME, unique=True,
+                partialFilterExpression={"password_reset_token_hash": {"$type": "string"}},
+            )
+        except Exception:
+            raise RuntimeError("Password reset token uniqueness index initialization failed; API startup aborted") from None
         yield
     finally:
         await client.close()
@@ -210,3 +218,63 @@ async def login(data: LoginData):
         "account_type": user["account_type"],
         "organization": user["organization"],
     }
+
+RESET_REQUEST_MESSAGE = "If an account exists for this email, a password-reset link may arrive. Check your inbox and spam folder."
+
+
+async def send_password_reset_background(email):
+    try:
+        await issue_password_reset(users_collection, email, email_sender)
+    except EmailSubmissionUncertain:
+        pass  # SMTP adapter already emits sanitized diagnostics.
+    except EmailDeliveryError:
+        pass
+    except (ConnectionFailure, OperationFailure) as error:
+        _log_failure("reset_database", error, "failed")
+    except Exception as error:
+        # Background failures must never emit raw exception text or a traceback.
+        _log_failure("reset_background", error, "failed")
+
+
+async def read_reset_payload(request):
+    try:
+        payload = await request.json()
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="Invalid request") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Invalid request")
+    return payload
+
+
+@app.post("/api/auth/forgot-password", status_code=202)
+async def forgot_password(request: Request, background_tasks: BackgroundTasks):
+    payload = await read_reset_payload(request)
+    try:
+        email = str(TypeAdapter(EmailStr).validate_python(payload.get("work_email"))).lower()
+    except ValidationError:
+        raise HTTPException(status_code=422, detail="Enter a valid work email address") from None
+    # Schedule the same task for every valid input; no account lookup or SMTP wait
+    # occurs before this generic response is returned.
+    background_tasks.add_task(send_password_reset_background, email)
+    return {"message": RESET_REQUEST_MESSAGE}
+
+
+@app.post("/api/auth/reset-password")
+async def reset_password_endpoint(request: Request):
+    payload = await read_reset_payload(request)
+    token = payload.get("token")
+    invalid_detail = "Invalid or expired password reset token"
+    if not isinstance(token, str) or TOKEN_PATTERN.fullmatch(token) is None:
+        raise HTTPException(status_code=400, detail=invalid_detail)
+    new_password = payload.get("new_password")
+    if not isinstance(new_password, str) or not 8 <= len(new_password) <= 128:
+        raise HTTPException(status_code=422, detail="Password must contain 8 to 128 characters")
+    # Keep password hashing errors outside the database-failure boundary.
+    new_hash = password_hash.hash(new_password)
+    try:
+        changed = await reset_password(users_collection, token, new_hash)
+    except (ConnectionFailure, OperationFailure):
+        raise HTTPException(status_code=503, detail="Password reset temporarily unavailable") from None
+    if not changed:
+        raise HTTPException(status_code=400, detail=invalid_detail)
+    return {"message": "Password reset successfully. Log in with your new password; email verification is still required."}

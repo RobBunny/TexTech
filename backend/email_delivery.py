@@ -78,6 +78,11 @@ def verification_link(frontend_url, token):
     return urlunsplit((url.scheme, url.netloc, url.path or "/", "", "verify-email=" + token))
 
 
+def password_reset_link(frontend_url, token):
+    url = urlsplit(frontend_url)
+    return urlunsplit((url.scheme, url.netloc, url.path or "/", "", "reset-password=" + token))
+
+
 class SMTPEmailSender:
     async def send_verification(self, recipient, token):
         try:
@@ -92,8 +97,20 @@ class SMTPEmailSender:
             # Do not propagate SMTP replies, configuration values, or message bodies.
             raise EmailDeliveryError("Verification email could not be submitted") from None
 
+    async def send_password_reset(self, recipient, token):
+        try:
+            config = SMTPConfig.from_environment()
+            await asyncio.to_thread(self._send, config, recipient, token, purpose="password_reset")
+        except EmailSubmissionUncertain:
+            raise EmailSubmissionUncertain("Password reset email submission could not be confirmed") from None
+        except EmailDeliveryError:
+            raise EmailDeliveryError("Password reset email could not be submitted") from None
+        except Exception as error:
+            _log_failure("dispatch", error, "failed")
+            raise EmailDeliveryError("Password reset email could not be submitted") from None
+
     @staticmethod
-    def _send(config, recipient, token):
+    def _send(config, recipient, token, *, purpose="verification"):
         stage = "message"
         outcome = "failed"
         primary_error = None
@@ -103,12 +120,21 @@ class SMTPEmailSender:
             message = EmailMessage()
             message["From"] = formataddr((config.sender_name, config.sender_address))
             message["To"] = recipient
-            message["Subject"] = "Verify your TexTech email"
-            message.set_content(
-                "Confirm your email address using this link:\n"
-                + verification_link(config.frontend_url, token)
-                + "\n\nThis link expires 30 minutes after this verification link was issued."
-            )
+            if purpose == "password_reset":
+                message["Subject"] = "Reset your TexTech password"
+                message.set_content(
+                    "Choose a new password using this link:\n"
+                    + password_reset_link(config.frontend_url, token)
+                    + "\n\nThis link expires 30 minutes after it was issued."
+                    + "\nIf you did not request this, you can ignore this email."
+                )
+            else:
+                message["Subject"] = "Verify your TexTech email"
+                message.set_content(
+                    "Confirm your email address using this link:\n"
+                    + verification_link(config.frontend_url, token)
+                    + "\n\nThis link expires 30 minutes after this verification link was issued."
+                )
             stage = "tls"
             context = ssl.create_default_context()
             stage = "connection"

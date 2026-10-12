@@ -75,6 +75,22 @@ function clearVerificationFragment() {
     `${window.location.pathname}${window.location.search}${remaining ? `#${remaining}` : ""}`);
 }
 
+function readResetFragment() {
+  const fragment = window.location.hash.slice(1);
+  if (!fragment.startsWith("reset-password=")) return null;
+  return new URLSearchParams(fragment).get("reset-password") || "";
+}
+
+function clearResetFragment() {
+  if (!window.location.hash.slice(1).startsWith("reset-password=")) return;
+  const remaining = window.location.hash.slice(1).split("&")
+    .filter((part) => part.split("=")[0] !== "reset-password").join("&");
+  window.history.replaceState(window.history.state, "",
+    `${window.location.pathname}${window.location.search}${remaining ? `#${remaining}` : ""}`);
+}
+
+const RESET_REQUEST_NOTICE = "If an account exists for this email, a password-reset link may arrive. Check your inbox and spam folder.";
+
 function App() {
   const [isSignup, setIsSignup] = useState(false);
   const [isForgotPassword, setIsForgotPassword] = useState(false);
@@ -96,6 +112,10 @@ function App() {
   const [verificationToken, setVerificationToken] = useState(readVerificationFragment);
   const [verificationResult, setVerificationResult] = useState("ready");
   const [signupNotice, setSignupNotice] = useState(null);
+  const [resetToken, setResetToken] = useState(readResetFragment);
+  const [resetResult, setResetResult] = useState("ready");
+  const isReset = resetToken !== null;
+  const resetScreen = useRef(isReset);
   const pendingRequest = useRef(null);
   const screenVersion = useRef(0);
   const isVerification = verificationToken !== null;
@@ -114,6 +134,15 @@ function App() {
       pendingRequest.current = null;
       setLoading(false);
       setVerificationToken(readVerificationFragment());
+      const nextReset = readResetFragment();
+      if (resetScreen.current || nextReset !== null) {
+        setFormData((current) => ({ ...current, password: "", confirmPassword: "" }));
+        setShowPassword(false);
+        setShowConfirmPassword(false);
+      }
+      resetScreen.current = nextReset !== null;
+      setResetToken(nextReset);
+      setResetResult("ready");
       setVerificationResult("ready");
       setSignupNotice(null);
       setMessage("");
@@ -131,6 +160,15 @@ function App() {
   function leaveVerification() {
     cancelPending();
     clearVerificationFragment();
+    clearResetFragment();
+    setResetToken(null);
+    setResetResult("ready");
+    if (resetScreen.current || isForgotPassword) {
+      setFormData((current) => ({ ...current, password: "", confirmPassword: "" }));
+      setShowPassword(false);
+      setShowConfirmPassword(false);
+    }
+    resetScreen.current = false;
     setVerificationToken(null);
     setVerificationResult("ready");
     setSignupNotice(null);
@@ -173,6 +211,61 @@ function App() {
       setMessageType("error");
     } finally {
       if (stillCurrent()) {
+        pendingRequest.current = null;
+        setLoading(false);
+      }
+    }
+  }
+
+  async function handleReset(event) {
+    event.preventDefault();
+    if (pendingRequest.current || resetResult !== "ready") return;
+    setMessage("");
+    setMessageType("");
+    if (formData.password.length < 8 || formData.password.length > 128) {
+      setMessage("Password must contain 8 to 128 characters.");
+      setMessageType("error");
+      return;
+    }
+    if (formData.password !== formData.confirmPassword) {
+      setMessage("Passwords do not match.");
+      setMessageType("error");
+      return;
+    }
+    const controller = new AbortController();
+    const version = screenVersion.current;
+    pendingRequest.current = controller;
+    const stillCurrent = () => version === screenVersion.current && !controller.signal.aborted;
+    setLoading(true);
+    try {
+      const data = await submitRequest("/api/auth/reset-password",
+        { token: resetToken, new_password: formData.password },
+        "Password reset could not be confirmed.", controller.signal);
+      if (!stillCurrent()) return;
+      if (data.message !== "Password reset successfully. Log in with your new password; email verification is still required.") {
+        throw new Error("Reset confirmation missing");
+      }
+      setResetResult("success");
+      setResetToken("");
+      clearResetFragment();
+      setMessage("Your password has been reset. Return to login and use your new password. Email verification is still required.");
+      setMessageType("success");
+    } catch (error) {
+      if (!stillCurrent()) return;
+      if (error.status === 400) {
+        setResetResult("invalid");
+        setResetToken("");
+        clearResetFragment();
+        setMessage("This reset link is invalid, expired, or already used. If the reset was already processed, try logging in with your new password. Otherwise, request a new link.");
+      } else if (error.status === 422) {
+        setMessage("Password must contain 8 to 128 characters.");
+      } else {
+        setMessage("Password reset could not be confirmed. Try again later; if it was already processed, log in with your new password or request a new link.");
+      }
+      setMessageType("error");
+    } finally {
+      if (stillCurrent()) {
+        setFormData((current) => ({ ...current, password: "", confirmPassword: "" }));
         pendingRequest.current = null;
         setLoading(false);
       }
@@ -224,14 +317,6 @@ function App() {
     setMessage("");
     setMessageType("");
 
-    if (isForgotPassword) {
-      setMessage(
-        "Password reset is not set up on the server yet. Please contact your TexTech administrator."
-      );
-      setMessageType("info");
-      return;
-    }
-
     if (isSignup) {
       if (formData.password.length < 8) {
         setMessage("Password must contain at least 8 characters.");
@@ -253,11 +338,18 @@ function App() {
     const controller = new AbortController();
     const version = screenVersion.current;
     const submittingSignup = isSignup;
+    const submittingForgot = isForgotPassword;
     pendingRequest.current = controller;
     const stillCurrent = () => version === screenVersion.current && !controller.signal.aborted;
     setLoading(true);
     try {
-      if (isSignup) {
+      if (isForgotPassword) {
+        await submitRequest("/api/auth/forgot-password", { work_email: formData.email.trim() },
+          "Reset request could not be confirmed. Please try again later.", controller.signal);
+        if (!stillCurrent()) return;
+        setMessage(RESET_REQUEST_NOTICE);
+        setMessageType("info");
+      } else if (isSignup) {
         const data = await submitRequest(
           "/api/auth/register",
           {
@@ -315,6 +407,11 @@ function App() {
       }
     } catch (error) {
       if (!stillCurrent()) return;
+      if (submittingForgot) {
+        setMessage(error.status === 422 ? "Enter a valid work email address." : "Reset request could not be confirmed. Please try again later.");
+        setMessageType("error");
+        return;
+      }
       let text = submittingSignup
         ? "Registration could not be confirmed. Your account may have been created; check your email before trying again."
         : "Login could not be completed. Please try again.";
@@ -359,7 +456,8 @@ function App() {
   }
 
   function showForgotPassword() {
-    cancelPending();
+    leaveVerification();
+    setFormData((current) => ({ ...current, password: "", confirmPassword: "" }));
     setSignupNotice(null);
     setIsForgotPassword(true);
     setMessage("");
@@ -367,8 +465,8 @@ function App() {
   }
 
   return (
-    <div className={`auth-page${isSignup || isVerification || signupNotice ? " signup-mode" : " login-mode"}`}>
-      {!isSignup && !isVerification && !signupNotice && (
+    <div className={`auth-page${isSignup || isVerification || isReset || signupNotice ? " signup-mode" : " login-mode"}`}>
+      {!isSignup && !isVerification && !isReset && !signupNotice && (
         <aside className="role-sidebar">
           <Brand />
           <AccountTypeOptions
@@ -394,7 +492,7 @@ function App() {
           </header>
         )}
 
-        {!isSignup && !isVerification && !signupNotice && (
+        {!isSignup && !isVerification && !isReset && !signupNotice && (
           <div className="mobile-role-selector">
             <AccountTypeOptions
               accountType={accountType}
@@ -403,7 +501,51 @@ function App() {
           </div>
         )}
 
-        {isVerification || signupNotice ? (
+        {isReset ? (
+          <section className="auth-card verification-card">
+            <div className="form-heading">
+              <span className="eyebrow">ACCOUNT RECOVERY</span>
+              <h1>{resetResult === "success" ? "Password reset" : "Reset your password"}</h1>
+              <p>Choose a new password. This link expires 30 minutes after it was issued.</p>
+            </div>
+            {resetResult === "ready" && (
+              <form onSubmit={handleReset}>
+                <div className="field">
+                  <label htmlFor="resetPassword">New password</label>
+                  <div className="input-wrap">
+                    <LockKeyhole size={18} />
+                    <input id="resetPassword" name="password" type={showPassword ? "text" : "password"}
+                      value={formData.password} onChange={handleChange} autoComplete="new-password"
+                      placeholder="8 to 128 characters" minLength={8} maxLength={128} required />
+                    <button className="eye-button" type="button" onClick={() => setShowPassword((visible) => !visible)}
+                      aria-label={showPassword ? "Hide password" : "Show password"}>
+                      {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                    </button>
+                  </div>
+                </div>
+                <div className="field">
+                  <label htmlFor="resetConfirmPassword">Confirm new password</label>
+                  <div className="input-wrap">
+                    <LockKeyhole size={18} />
+                    <input id="resetConfirmPassword" name="confirmPassword" type={showConfirmPassword ? "text" : "password"}
+                      value={formData.confirmPassword} onChange={handleChange} autoComplete="new-password"
+                      placeholder="Enter your new password again" minLength={8} maxLength={128} required />
+                    <button className="eye-button" type="button" onClick={() => setShowConfirmPassword((visible) => !visible)}
+                      aria-label={showConfirmPassword ? "Hide password" : "Show password"}>
+                      {showConfirmPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+                    </button>
+                  </div>
+                </div>
+                <button className="submit-button" type="submit" disabled={loading}>
+                  {loading ? "Resetting password..." : "Reset password"}
+                </button>
+              </form>
+            )}
+            {message && <div className={`form-message ${messageType}`} role={messageType === "error" ? "alert" : "status"} aria-live="polite">{message}</div>}
+            {resetResult === "invalid" && <p className="login-prompt"><button className="form-link" type="button" onClick={showForgotPassword}>Request a new reset link</button></p>}
+            <p className="login-prompt"><button className="form-link" type="button" onClick={leaveVerification}>Return to login</button></p>
+          </section>
+        ) : isVerification || signupNotice ? (
           <section className="auth-card verification-card">
             <div className="form-heading">
               <span className="eyebrow">EMAIL VERIFICATION</span>
@@ -658,7 +800,7 @@ function App() {
               {loading
                 ? isSignup
                   ? "Creating account..."
-                  : "Logging in..."
+                  : isForgotPassword ? "Requesting reset link..." : "Logging in..."
                 : isSignup
                   ? "Create Account"
                   : isForgotPassword
