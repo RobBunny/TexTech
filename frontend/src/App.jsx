@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowRight,
   Building2,
@@ -60,6 +60,21 @@ function Brand() {
   );
 }
 
+function readVerificationFragment() {
+  const fragment = window.location.hash.slice(1);
+  if (!fragment.startsWith("verify-email=")) return null;
+  const parameters = new URLSearchParams(fragment);
+  return parameters.get("verify-email") || "";
+}
+
+function clearVerificationFragment() {
+  if (!window.location.hash.slice(1).startsWith("verify-email=")) return;
+  const remaining = window.location.hash.slice(1).split("&")
+    .filter((part) => part.split("=")[0] !== "verify-email").join("&");
+  window.history.replaceState(window.history.state, "",
+    `${window.location.pathname}${window.location.search}${remaining ? `#${remaining}` : ""}`);
+}
+
 function App() {
   const [isSignup, setIsSignup] = useState(false);
   const [isForgotPassword, setIsForgotPassword] = useState(false);
@@ -78,6 +93,92 @@ function App() {
   const [message, setMessage] = useState("");
   const [messageType, setMessageType] = useState("");
   const [loading, setLoading] = useState(false);
+  const [verificationToken, setVerificationToken] = useState(readVerificationFragment);
+  const [verificationResult, setVerificationResult] = useState("ready");
+  const [signupNotice, setSignupNotice] = useState(null);
+  const pendingRequest = useRef(null);
+  const screenVersion = useRef(0);
+  const isVerification = verificationToken !== null;
+
+  function cancelPending() {
+    screenVersion.current += 1;
+    pendingRequest.current?.abort();
+    pendingRequest.current = null;
+    setLoading(false);
+  }
+
+  useEffect(() => {
+    function onHashChange() {
+      screenVersion.current += 1;
+      pendingRequest.current?.abort();
+      pendingRequest.current = null;
+      setLoading(false);
+      setVerificationToken(readVerificationFragment());
+      setVerificationResult("ready");
+      setSignupNotice(null);
+      setMessage("");
+      setMessageType("");
+    }
+    window.addEventListener("hashchange", onHashChange);
+    return () => {
+      window.removeEventListener("hashchange", onHashChange);
+      screenVersion.current += 1;
+      pendingRequest.current?.abort();
+      pendingRequest.current = null;
+    };
+  }, []);
+
+  function leaveVerification() {
+    cancelPending();
+    clearVerificationFragment();
+    setVerificationToken(null);
+    setVerificationResult("ready");
+    setSignupNotice(null);
+    setIsSignup(false);
+    setIsForgotPassword(false);
+    setMessage("");
+    setMessageType("");
+  }
+
+  async function handleVerify() {
+    if (pendingRequest.current || verificationResult !== "ready") return;
+    const controller = new AbortController();
+    const version = screenVersion.current;
+    pendingRequest.current = controller;
+    const stillCurrent = () => version === screenVersion.current && !controller.signal.aborted;
+    setLoading(true);
+    setMessage("");
+    try {
+      const data = await submitRequest("/api/auth/verify-email", { token: verificationToken },
+        "Email verification could not be confirmed. Please try again.", controller.signal);
+      if (!stillCurrent()) return;
+      if (data.message !== "Email verified successfully") {
+        throw new Error("Verification confirmation missing");
+      }
+      setVerificationResult("success");
+      setVerificationToken("");
+      clearVerificationFragment();
+      setMessage("Your email is verified. You can now log in.");
+      setMessageType("success");
+    } catch (error) {
+      if (!stillCurrent()) return;
+      if (error.status === 400) {
+        setVerificationResult("invalid");
+        setVerificationToken("");
+        clearVerificationFragment();
+        setMessage("This verification link is invalid, expired, or already used. If you have already verified your email, return to login. Otherwise, a new link is needed; resend is not available yet.");
+      } else {
+        setMessage("Email verification could not be confirmed. The server may be temporarily unavailable. Try again; if the link was already processed, return to login.");
+      }
+      setMessageType("error");
+    } finally {
+      if (stillCurrent()) {
+        pendingRequest.current = null;
+        setLoading(false);
+      }
+    }
+  }
+
   const selectedAccountType = ACCOUNT_TYPES.find(
     (type) => type.value === accountType
   );
@@ -90,21 +191,36 @@ function App() {
     }));
   }
 
-  async function submitRequest(path, payload, fallback) {
+  async function submitRequest(path, payload, fallback, signal) {
     const response = await fetch(`${API_BASE}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal
     });
-    const data = await response.json();
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      const error = new Error(fallback);
+      error.status = response.status;
+      throw error;
+    }
     if (!response.ok) {
-      throw new Error(data.detail || fallback);
+      // Use local messages: never display raw response bodies or validation inputs.
+      const error = new Error(fallback);
+      error.status = response.status;
+      throw error;
+    }
+    if (!data || typeof data !== "object" || Array.isArray(data)) {
+      throw new Error(fallback);
     }
     return data;
   }
 
   async function handleSubmit(event) {
     event.preventDefault();
+    if (pendingRequest.current) return;
     setMessage("");
     setMessageType("");
 
@@ -134,10 +250,15 @@ function App() {
       }
     }
 
+    const controller = new AbortController();
+    const version = screenVersion.current;
+    const submittingSignup = isSignup;
+    pendingRequest.current = controller;
+    const stillCurrent = () => version === screenVersion.current && !controller.signal.aborted;
     setLoading(true);
     try {
       if (isSignup) {
-        await submitRequest(
+        const data = await submitRequest(
           "/api/auth/register",
           {
             full_name: formData.fullName.trim(),
@@ -147,11 +268,21 @@ function App() {
             organization: formData.company.trim(),
             password: formData.password
           },
-          "Registration failed. Please try again."
+          "Registration could not be confirmed. Your account may have been created; do not immediately register again.",
+          controller.signal
         );
 
-        setMessage("Your account has been created. You can now log in.");
-        setMessageType("success");
+        if (!stillCurrent()) return;
+        const notices = {
+          submitted: "Your account was created and a verification email was submitted. Check your inbox and spam folder. Use the email link to verify before logging in.",
+          failed: "Your account was created, but the verification email could not be submitted. Do not register again. Verification is required before login; resend is not available yet.",
+          uncertain: "Your account was created, but email submission could not be confirmed. The email may still arrive; check your inbox and spam folder. Verify before logging in. Do not register again; resend is not available yet."
+        };
+        const status = data.verification_email_status;
+        setSignupNotice({
+          text: Object.hasOwn(notices, status) ? notices[status] : "Your account was created, but email submission status is unknown. Check your inbox for a verification link. Verification is required before login; resend is not available yet.",
+          type: status === "failed" ? "error" : "info"
+        });
         setFormData((current) => ({
           ...current,
           fullName: "",
@@ -170,26 +301,48 @@ function App() {
             password: formData.password,
             account_type: accountType
           },
-          "Login failed. Please try again."
+          "Login could not be completed. Please try again.",
+          controller.signal
         );
 
+        if (!stillCurrent()) return;
+        if (typeof data.full_name !== "string" || !data.user_id) {
+          throw new Error("Login confirmation missing");
+        }
         setMessage(`Welcome back, ${data.full_name}.`);
         setMessageType("success");
         setFormData((current) => ({ ...current, password: "" }));
       }
     } catch (error) {
-      setMessage(
-        error instanceof TypeError
-          ? "Could not connect to TexTech's server. Please check that the backend is running."
-          : error.message
-      );
+      if (!stillCurrent()) return;
+      let text = submittingSignup
+        ? "Registration could not be confirmed. Your account may have been created; check your email before trying again."
+        : "Login could not be completed. Please try again.";
+      if (!submittingSignup && error.status === 403) {
+        text = "Verify your email before logging in. Open the verification link in your email. If you need a new link, resend is not available yet.";
+      } else if (!submittingSignup && error.status === 401) {
+        text = "Invalid email, password, or account type.";
+      } else if (submittingSignup && error.status === 409) {
+        text = "An account with this email already exists. Do not register again. Verify using your email link before login; resend is not available yet.";
+      } else if (error.status === 422) {
+        text = "Please check your details and try again.";
+      } else if (error.status === 503) {
+        text = submittingSignup
+          ? "Registration is temporarily unavailable. Check your email before trying again if account creation was interrupted."
+          : "Login is temporarily unavailable. Please try again later.";
+      }
+      setMessage(text);
       setMessageType("error");
     } finally {
-      setLoading(false);
+      if (stillCurrent()) {
+        pendingRequest.current = null;
+        setLoading(false);
+      }
     }
   }
 
   function switchPage(showSignup) {
+    leaveVerification();
     setIsSignup(showSignup);
     setIsForgotPassword(false);
     setMessage("");
@@ -197,6 +350,7 @@ function App() {
   }
 
   function chooseAccountType(value) {
+    leaveVerification();
     setAccountType(value);
     setIsSignup(false);
     setIsForgotPassword(false);
@@ -205,14 +359,16 @@ function App() {
   }
 
   function showForgotPassword() {
+    cancelPending();
+    setSignupNotice(null);
     setIsForgotPassword(true);
     setMessage("");
     setMessageType("");
   }
 
   return (
-    <div className={`auth-page${isSignup ? " signup-mode" : " login-mode"}`}>
-      {!isSignup && (
+    <div className={`auth-page${isSignup || isVerification || signupNotice ? " signup-mode" : " login-mode"}`}>
+      {!isSignup && !isVerification && !signupNotice && (
         <aside className="role-sidebar">
           <Brand />
           <AccountTypeOptions
@@ -238,7 +394,7 @@ function App() {
           </header>
         )}
 
-        {!isSignup && (
+        {!isSignup && !isVerification && !signupNotice && (
           <div className="mobile-role-selector">
             <AccountTypeOptions
               accountType={accountType}
@@ -247,6 +403,27 @@ function App() {
           </div>
         )}
 
+        {isVerification || signupNotice ? (
+          <section className="auth-card verification-card">
+            <div className="form-heading">
+              <span className="eyebrow">EMAIL VERIFICATION</span>
+              <h1>{signupNotice ? "Check your email" : verificationResult === "success" ? "Email verified" : "Verify your email"}</h1>
+              <p>{signupNotice ? "Your account needs email verification before login." : "Confirm your email using the button below. Opening this page does not verify your account."}</p>
+            </div>
+            <div className={`form-message ${signupNotice?.type || messageType || "info"}`}
+              role={(signupNotice?.type || messageType) === "error" ? "alert" : "status"} aria-live="polite">
+              {signupNotice?.text || message || "This link expires 30 minutes after it was issued."}
+            </div>
+            {isVerification && verificationResult === "ready" && (
+              <button className="submit-button" type="button" disabled={loading} onClick={handleVerify}>
+                {loading ? "Verifying..." : "Verify email"}
+              </button>
+            )}
+            <p className="login-prompt">
+              <button className="form-link" type="button" onClick={leaveVerification}>Return to login</button>
+            </p>
+          </section>
+        ) : (
         <section className="auth-card">
           <div className="form-heading">
             <span className="eyebrow">
@@ -279,7 +456,7 @@ function App() {
                 <select
                   id="accountType"
                   value={accountType}
-                  onChange={(event) => setAccountType(event.target.value)}
+                  onChange={(event) => { cancelPending(); setAccountType(event.target.value); }}
                 >
                   {ACCOUNT_TYPES.map((type) => (
                     <option key={type.value} value={type.value}>
@@ -510,6 +687,7 @@ function App() {
             Your information is protected and handled securely.
           </p>
         </section>
+        )}
       </main>
     </div>
   );
