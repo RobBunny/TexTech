@@ -1,14 +1,18 @@
 
+import os
+import secrets
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
+from bson import ObjectId
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, EmailStr, Field, TypeAdapter, ValidationError
 from pwdlib import PasswordHash
 from pymongo.errors import ConnectionFailure, DuplicateKeyError, OperationFailure
 
-from database import client, users_collection
+from database import client, db, users_collection
 from email_delivery import EmailDeliveryError, EmailSubmissionUncertain, SMTPEmailSender, _log_failure
 from email_verification import create_token_fields, verify_email, TOKEN_PATTERN
 from password_reset import issue_password_reset, reset_password, TOKEN_INDEX_NAME as RESET_TOKEN_INDEX_NAME
@@ -17,6 +21,8 @@ from password_reset import issue_password_reset, reset_password, TOKEN_INDEX_NAM
 password_hash = PasswordHash.recommended()
 email_sender = SMTPEmailSender()
 TOKEN_INDEX_NAME = "unique_email_verification_token_hash"
+basic_auth = HTTPBasic()
+portfolios_collection = db["portfolios"]
 
 
 @asynccontextmanager
@@ -24,6 +30,7 @@ async def lifespan(app: FastAPI):
     try:
         await client.admin.command("ping")
         await users_collection.create_index("work_email", unique=True)
+        await portfolios_collection.create_index("work_email", unique=True)
         try:
             await users_collection.create_index(
                 "email_verification_token_hash",
@@ -84,6 +91,45 @@ class LoginData(BaseModel):
         "textile_supplier",
         "admin_authority",
     ]
+
+
+class PortfolioData(BaseModel):
+    category: Literal["buying_house", "factory", "foreign_buyer"]
+    company_name: str = Field(min_length=2, max_length=150)
+    contact_name: str = Field(min_length=2, max_length=100)
+    work_email: EmailStr
+    phone: str = Field(min_length=6, max_length=20)
+    country: str = Field(min_length=2, max_length=100)
+    website: str = Field(default="", max_length=200)
+    specialties: str = Field(default="", max_length=500)
+    description: str = Field(default="", max_length=2000)
+
+
+def require_admin(credentials: HTTPBasicCredentials = Depends(basic_auth)):
+    username = os.getenv("ADMIN_USERNAME")
+    password = os.getenv("ADMIN_PASSWORD")
+    if not username or not password:
+        raise HTTPException(
+            status_code=503,
+            detail="Configure ADMIN_USERNAME and ADMIN_PASSWORD in backend/.env",
+        )
+    if not (
+        secrets.compare_digest(credentials.username, username)
+        and secrets.compare_digest(credentials.password, password)
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect admin credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    return credentials.username
+
+
+def serialize_portfolio(portfolio):
+    return {
+        "id": str(portfolio["_id"]),
+        **{key: value for key, value in portfolio.items() if key != "_id"},
+    }
 
 
 @app.get("/")
@@ -278,3 +324,66 @@ async def reset_password_endpoint(request: Request):
     if not changed:
         raise HTTPException(status_code=400, detail=invalid_detail)
     return {"message": "Password reset successfully. Log in with your new password; email verification is still required."}
+
+@app.get("/api/admin/portfolios")
+async def list_portfolios(
+    category: str | None = None,
+    _admin: str = Depends(require_admin),
+):
+    query = {"category": category} if category else {}
+    portfolios = await portfolios_collection.find(query).sort("company_name", 1).to_list(500)
+    return [serialize_portfolio(portfolio) for portfolio in portfolios]
+
+
+@app.post("/api/admin/portfolios", status_code=201)
+async def create_portfolio(
+    data: PortfolioData,
+    _admin: str = Depends(require_admin),
+):
+    portfolio = data.model_dump()
+    portfolio["work_email"] = str(data.work_email).lower()
+    try:
+        result = await portfolios_collection.insert_one(portfolio)
+    except DuplicateKeyError:
+        raise HTTPException(status_code=409, detail="A portfolio with this email already exists")
+    portfolio["_id"] = result.inserted_id
+    return serialize_portfolio(portfolio)
+
+
+@app.get("/api/admin/portfolios/{portfolio_id}")
+async def get_portfolio(portfolio_id: str, _admin: str = Depends(require_admin)):
+    if not ObjectId.is_valid(portfolio_id):
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+    portfolio = await portfolios_collection.find_one({"_id": ObjectId(portfolio_id)})
+    if portfolio is None:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+    return serialize_portfolio(portfolio)
+
+
+@app.put("/api/admin/portfolios/{portfolio_id}")
+async def update_portfolio(
+    portfolio_id: str,
+    data: PortfolioData,
+    _admin: str = Depends(require_admin),
+):
+    if not ObjectId.is_valid(portfolio_id):
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+    portfolio = data.model_dump()
+    portfolio["work_email"] = str(data.work_email).lower()
+    result = await portfolios_collection.find_one_and_update(
+        {"_id": ObjectId(portfolio_id)},
+        {"$set": portfolio},
+        return_document=True,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+    return serialize_portfolio(result)
+
+
+@app.delete("/api/admin/portfolios/{portfolio_id}", status_code=204)
+async def delete_portfolio(portfolio_id: str, _admin: str = Depends(require_admin)):
+    if not ObjectId.is_valid(portfolio_id):
+        raise HTTPException(status_code=404, detail="Portfolio not found")
+    result = await portfolios_collection.delete_one({"_id": ObjectId(portfolio_id)})
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Portfolio not found")

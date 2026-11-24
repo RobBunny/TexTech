@@ -11,6 +11,7 @@ import {
   UserRound
 } from "lucide-react";
 import "./App.css";
+import AdminDashboard from "./AdminDashboard.jsx";
 
 const API_BASE = (
   import.meta.env.VITE_API_URL || "http://127.0.0.1:8000"
@@ -92,6 +93,14 @@ function clearResetFragment() {
 const RESET_REQUEST_NOTICE = "If an account exists for this email, a password-reset link may arrive. Check your inbox and spam folder.";
 
 function App() {
+  if (window.location.pathname === "/admin") {
+    return <AdminDashboard />;
+  }
+
+  return <SignupPage />;
+}
+
+function SignupPage() {
   const [isSignup, setIsSignup] = useState(false);
   const [isForgotPassword, setIsForgotPassword] = useState(false);
   const [showPassword, setShowPassword] = useState(false);

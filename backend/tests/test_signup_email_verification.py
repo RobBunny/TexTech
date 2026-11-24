@@ -15,6 +15,7 @@ def load_main():
     # Never import database.py: it loads .env and constructs a real client.
     database = ModuleType("database")
     database.client = SimpleNamespace(admin=SimpleNamespace(command=AsyncMock()), close=AsyncMock())
+    database.db = {"portfolios": SimpleNamespace(create_index=AsyncMock())}
     database.users_collection = SimpleNamespace(create_index=AsyncMock(), insert_one=AsyncMock(), find_one=AsyncMock())
     spec = importlib.util.spec_from_file_location("offline_signup_main", Path(__file__).parents[1] / "main.py")
     module = importlib.util.module_from_spec(spec)
