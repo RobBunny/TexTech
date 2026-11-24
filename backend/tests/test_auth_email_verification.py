@@ -8,6 +8,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
+from bson import ObjectId
 from pymongo.errors import ConnectionFailure, OperationFailure
 from email_verification import create_token_fields
 from test_signup_email_verification import load_main
@@ -119,6 +120,9 @@ class AdminPortfolioAuthTests(unittest.IsolatedAsyncioTestCase):
         cursor = SimpleNamespace(sort=Mock(), to_list=AsyncMock(return_value=[]))
         cursor.sort.return_value = cursor
         self.module.portfolios_collection = SimpleNamespace(find=Mock(return_value=cursor))
+        registration_cursor = SimpleNamespace(sort=Mock(), to_list=AsyncMock(return_value=[]))
+        registration_cursor.sort.return_value = registration_cursor
+        self.module.users_collection.find = Mock(return_value=registration_cursor)
         token = base64.b64encode(f"admin@example.com:{self.password}".encode()).decode()
         self.headers = {"authorization": f"Basic {token}"}
 
@@ -157,13 +161,53 @@ class AdminPortfolioAuthTests(unittest.IsolatedAsyncioTestCase):
             (401, {"detail": "Incorrect admin credentials"}),
         )
 
+    async def test_admin_can_list_verified_registrations_waiting_for_approval(self):
+        created_at = datetime.now(timezone.utc)
+        self.module.users_collection.find.return_value.to_list.return_value = [{
+            "_id": ObjectId(),
+            "full_name": "Buyer",
+            "work_email": "buyer@example.com",
+            "phone": "12345678",
+            "organization": "Buyer Company",
+            "account_type": "foreign_buyer",
+            "created_at": created_at,
+        }]
+
+        status, registrations = await request(
+            self.module.app,
+            "/api/admin/registrations",
+            method="GET",
+            headers=self.headers,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(registrations[0]["work_email"], "buyer@example.com")
+        self.assertEqual(registrations[0]["created_at"], created_at.isoformat())
+        self.assertNotIn("password_hash", registrations[0])
+
+    async def test_admin_can_approve_a_verified_registration(self):
+        user_id = ObjectId()
+        self.module.users_collection.find_one_and_update = AsyncMock(
+            return_value={"_id": user_id, "approval_status": "approved"}
+        )
+
+        self.assertEqual(
+            await request(
+                self.module.app,
+                f"/api/admin/registrations/{user_id}/approve",
+                headers=self.headers,
+            ),
+            (200, {"message": "Registration approved", "user_id": str(user_id)}),
+        )
+
 
 class LoginEnforcementTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.module = load_main()
         self.payload = {"work_email": "buyer@example.com", "password": "long-password", "account_type": "foreign_buyer"}
         self.user = {"_id": "user", "full_name": "Buyer", "organization": "Company", "account_type": "foreign_buyer",
-                     "password_hash": self.module.password_hash.hash("long-password"), "email_verified": True}
+                     "password_hash": self.module.password_hash.hash("long-password"), "email_verified": True,
+                     "approval_status": "approved"}
         self.module.users_collection.find_one.return_value = self.user
 
     async def test_verified_login_preserves_response(self):
@@ -179,6 +223,13 @@ class LoginEnforcementTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await request(self.module.app, "/api/auth/login", self.payload),
                              (403, {"detail": "Email verification required before login"}))
             self.assertEqual(self.user, before)
+
+    async def test_verified_but_pending_registration_cannot_log_in(self):
+        self.user["approval_status"] = "pending"
+        self.assertEqual(
+            await request(self.module.app, "/api/auth/login", self.payload),
+            (403, {"detail": "Admin approval required before login"}),
+        )
 
     async def test_bad_credentials_do_not_disclose_verification_status(self):
         self.user["email_verified"] = False

@@ -25,7 +25,8 @@ class ResetRouteTests(unittest.IsolatedAsyncioTestCase):
         self.original = {"_id": "user", "work_email": EMAIL, "full_name": "Buyer",
             "account_type": "foreign_buyer", "organization": "Company",
             "password_hash": self.module.password_hash.hash("offline-old-password"),
-            "email_verified": False, "email_verification_token_hash": "verification-hash", **fields}
+            "email_verified": False, "approval_status": "approved",
+            "email_verification_token_hash": "verification-hash", **fields}
         self.collection = ResetCollectionFake(self.original)
         self.module.users_collection = self.collection
 

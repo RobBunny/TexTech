@@ -29,6 +29,8 @@ TexTech is a React frontend with a FastAPI and MongoDB backend.
 
 The admin directory starts empty. Add actual buying houses, factories, and foreign buyers from the dashboard. Their portfolios are stored in MongoDB; no demo records are generated.
 
+Company and buyer sign-ups remain pending after registration. Once they verify their email, the admin dashboard lists them under **Verified sign-up requests**. Approving a request enables login and adds that account to the directory and its category count.
+
 ## Collaborate with Git
 
 Commit and push source files, `backend/requirements.txt`, `frontend/package-lock.json`, and `backend/.env.example`. Do not push `.env` files, virtual environments, `node_modules`, or credentials. Each teammate should create their own `backend/.env` from the example and use the shared team MongoDB only if authorized.

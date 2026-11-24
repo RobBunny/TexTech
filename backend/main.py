@@ -1,6 +1,7 @@
 
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Literal
 
 from bson import ObjectId
@@ -9,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from pydantic import BaseModel, EmailStr, Field, TypeAdapter, ValidationError
 from pwdlib import PasswordHash
+from pymongo import ReturnDocument
 from pymongo.errors import ConnectionFailure, DuplicateKeyError, OperationFailure
 
 from database import client, db, users_collection
@@ -145,6 +147,7 @@ async def require_admin(credentials: HTTPBasicCredentials = Depends(basic_auth))
 def serialize_portfolio(portfolio):
     return {
         "id": str(portfolio["_id"]),
+        "source": "manual",
         **{key: value for key, value in portfolio.items() if key != "_id"},
     }
 
@@ -178,6 +181,8 @@ async def register(data: SignupData):
         "password_hash": password_hash.hash(data.password),
         "email_verified": False,
         "phone_verified": False,
+        "approval_status": "approved" if data.account_type == "admin_authority" else "pending",
+        "created_at": datetime.now(timezone.utc),
     }
 
     for attempt in range(3):
@@ -262,6 +267,8 @@ async def verify_email_endpoint(request: Request):
 @app.post("/api/auth/login")
 async def login(data: LoginData):
     email = str(data.work_email).lower()
+    if data.account_type == "admin_authority" and email not in configured_admin_emails():
+        raise HTTPException(status_code=403, detail="Admin email is not authorized")
     try:
         user = await users_collection.find_one({"work_email": email})
     except (ConnectionFailure, OperationFailure):
@@ -279,6 +286,9 @@ async def login(data: LoginData):
 
     if user.get("email_verified") is not True:
         raise HTTPException(status_code=403, detail="Email verification required before login")
+
+    if data.account_type != "admin_authority" and user.get("approval_status") != "approved":
+        raise HTTPException(status_code=403, detail="Admin approval required before login")
 
     return {
         "user_id": str(user["_id"]),
@@ -349,12 +359,97 @@ async def reset_password_endpoint(request: Request):
 
 @app.get("/api/admin/portfolios")
 async def list_portfolios(
-    category: str | None = None,
+    category: Literal["buying_house", "factory", "foreign_buyer"] | None = None,
     _admin: str = Depends(require_admin),
 ):
     query = {"category": category} if category else {}
     portfolios = await portfolios_collection.find(query).sort("company_name", 1).to_list(500)
-    return [serialize_portfolio(portfolio) for portfolio in portfolios]
+    profile_emails = {portfolio["work_email"] for portfolio in portfolios}
+    account_types = {
+        "buying_house": ["buying_house"],
+        "factory": ["textile_supplier"],
+        "foreign_buyer": ["foreign_buyer"],
+    }
+    user_account_types = (
+        account_types[category]
+        if category
+        else ["buying_house", "textile_supplier", "foreign_buyer"]
+    )
+    user_query = {
+        "account_type": {"$in": user_account_types},
+        "email_verified": True,
+        "approval_status": "approved",
+    }
+    approved_users = await users_collection.find(user_query).sort("organization", 1).to_list(500)
+    registered_profiles = [
+        {
+            "id": f"user:{user['_id']}",
+            "source": "registration",
+            "category": next(
+                category_name
+                for category_name, user_types in account_types.items()
+                if user["account_type"] in user_types
+            ),
+            "company_name": user["organization"],
+            "contact_name": user["full_name"],
+            "work_email": user["work_email"],
+            "phone": user["phone"],
+            "country": user.get("country", "Not provided"),
+            "website": user.get("website", ""),
+            "specialties": user.get("specialties", ""),
+            "description": user.get("description", ""),
+        }
+        for user in approved_users
+        if user["work_email"] not in profile_emails
+    ]
+    return [serialize_portfolio(portfolio) for portfolio in portfolios] + registered_profiles
+
+
+@app.get("/api/admin/registrations")
+async def list_registrations(_admin: str = Depends(require_admin)):
+    query = {
+        "account_type": {"$in": ["buying_house", "foreign_buyer", "textile_supplier"]},
+        "email_verified": True,
+        "approval_status": {"$ne": "approved"},
+    }
+    users = await users_collection.find(query).sort("created_at", -1).to_list(500)
+    return [
+        {
+            "id": str(user["_id"]),
+            "full_name": user["full_name"],
+            "work_email": user["work_email"],
+            "phone": user["phone"],
+            "organization": user["organization"],
+            "account_type": user["account_type"],
+            "created_at": user.get("created_at").isoformat() if user.get("created_at") else None,
+        }
+        for user in users
+    ]
+
+
+@app.post("/api/admin/registrations/{user_id}/approve")
+async def approve_registration(user_id: str, admin_email: str = Depends(require_admin)):
+    if not ObjectId.is_valid(user_id):
+        raise HTTPException(status_code=404, detail="Registration not found")
+    user = await users_collection.find_one_and_update(
+        {
+            "_id": ObjectId(user_id),
+            "account_type": {"$in": ["buying_house", "foreign_buyer", "textile_supplier"]},
+            "email_verified": True,
+            "approval_status": {"$ne": "approved"},
+        },
+        {
+            "$set": {
+                "approval_status": "approved",
+                "approved_at": datetime.now(timezone.utc),
+                "approved_by": admin_email,
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if user is None:
+        raise HTTPException(status_code=404, detail="Verified pending registration not found")
+    return {"message": "Registration approved", "user_id": str(user["_id"])}
 
 
 @app.post("/api/admin/portfolios", status_code=201)

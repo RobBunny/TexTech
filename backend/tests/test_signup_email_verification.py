@@ -72,6 +72,7 @@ class SignupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(doc["full_name"], "Buyer")
         self.assertEqual(doc["organization"], "Company")
         self.assertFalse(doc["email_verified"])
+        self.assertEqual(doc["approval_status"], "pending")
         self.assertNotIn(token, doc.values())
         self.assertEqual(doc["email_verification_token_hash"], hash_token(token))
         self.assertEqual(doc["email_verification_expires_at"] - doc["email_verification_issued_at"], timedelta(minutes=30))

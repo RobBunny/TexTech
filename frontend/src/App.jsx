@@ -335,6 +335,7 @@ function SignupPage({ onAdminAuthenticated }) {
       // Use local messages: never display raw response bodies or validation inputs.
       const error = new Error(fallback);
       error.status = response.status;
+      error.detail = typeof data.detail === "string" ? data.detail : "";
       throw error;
     }
     if (!data || typeof data !== "object" || Array.isArray(data)) {
@@ -454,7 +455,13 @@ function SignupPage({ onAdminAuthenticated }) {
       let text = submittingSignup
         ? "Registration could not be confirmed. Your account may have been created; check your email before trying again."
         : "Login could not be completed. Please try again.";
-      if (!submittingSignup && error.status === 403) {
+      if (submittingSignup && error.detail === "This email is not authorized to create an admin account") {
+        text = "This email is not authorized to create an admin account. Contact the TexTech administrator.";
+      } else if (!submittingSignup && error.detail === "Admin email is not authorized") {
+        text = "This email is not listed in ADMIN_EMAILS in backend/.env. Contact the TexTech administrator.";
+      } else if (!submittingSignup && error.detail === "Admin approval required before login") {
+        text = "Your email is verified. You can log in after the TexTech administrator approves your account.";
+      } else if (!submittingSignup && error.status === 403) {
         text = "Verify your email before logging in. Open the verification link in your email. If you need a new link, resend is not available yet.";
       } else if (!submittingSignup && error.status === 401) {
         text = "Invalid email, password, or account type.";

@@ -40,6 +40,7 @@ function AdminDashboard({ initialCredentials = null, onExit }) {
   const [credentials, setCredentials] = useState(initialCredentials);
   const [login, setLogin] = useState({ username: "", password: "" });
   const [profiles, setProfiles] = useState([]);
+  const [registrations, setRegistrations] = useState([]);
   const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
   const [form, setForm] = useState(emptyForm);
@@ -68,6 +69,15 @@ function AdminDashboard({ initialCredentials = null, onExit }) {
         }
         const data = await response.json();
         if (active) setProfiles(data);
+        const registrationsResponse = await fetch(`${API_URL}/api/admin/registrations`, {
+          headers: { Authorization: basicAuthHeader(initialCredentials) },
+        });
+        if (!registrationsResponse.ok) {
+          const body = await registrationsResponse.json().catch(() => ({}));
+          throw new Error(body.detail || "Could not load registrations");
+        }
+        const registrationData = await registrationsResponse.json();
+        if (active) setRegistrations(registrationData);
       } catch (requestError) {
         if (active) setError(requestError.message);
       } finally {
@@ -121,6 +131,24 @@ function AdminDashboard({ initialCredentials = null, onExit }) {
     }
   }
 
+  async function loadRegistrations(activeCredentials = credentials) {
+    if (!activeCredentials) return false;
+    try {
+      const response = await fetch(`${API_URL}/api/admin/registrations`, {
+        headers: { Authorization: basicAuthHeader(activeCredentials) },
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        throw new Error(body.detail || "Could not load registrations");
+      }
+      setRegistrations(await response.json());
+      return true;
+    } catch (requestError) {
+      setError(requestError.message);
+      return false;
+    }
+  }
+
   const visibleProfiles = useMemo(() => {
     const term = search.trim().toLowerCase();
     return profiles.filter((profile) =>
@@ -150,7 +178,9 @@ function AdminDashboard({ initialCredentials = null, onExit }) {
         const body = await response.json().catch(() => ({}));
         throw new Error(body.detail || "Sign-in failed");
       }
-      if (await loadProfiles(nextCredentials)) {
+      const profilesLoaded = await loadProfiles(nextCredentials);
+      const registrationsLoaded = await loadRegistrations(nextCredentials);
+      if (profilesLoaded && registrationsLoaded) {
         setCredentials(nextCredentials);
       }
     } catch (requestError) {
@@ -207,6 +237,16 @@ function AdminDashboard({ initialCredentials = null, onExit }) {
     }
   }
 
+  async function handleApprove(registration) {
+    setError("");
+    try {
+      await request(`/api/admin/registrations/${registration.id}/approve`, { method: "POST" });
+      await Promise.all([loadProfiles(), loadRegistrations()]);
+    } catch (requestError) {
+      setError(requestError.message);
+    }
+  }
+
   if (!credentials) {
     return (
       <main className="admin-login">
@@ -251,6 +291,28 @@ function AdminDashboard({ initialCredentials = null, onExit }) {
             <div><span className="admin-stat-icon"><Users size={18} /></span><span className="admin-stat-label">Foreign buyers</span><strong>{profiles.filter((item) => item.category === "foreign_buyer").length}</strong></div>
             <div><span className="admin-stat-icon"><Users size={18} /></span><span className="admin-stat-label">All profiles</span><strong>{profiles.length}</strong></div>
           </div>
+          <section className="admin-approvals">
+            <div className="admin-directory-head">
+              <div><h2>Verified sign-up requests</h2><p>Approve a company after it verifies its email.</p></div>
+              <div className="admin-approval-actions">
+                <span className="admin-badge">{registrations.length} waiting</span>
+                <button
+                  className="admin-secondary"
+                  type="button"
+                  onClick={() => Promise.all([loadProfiles(), loadRegistrations()])}
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
+            {registrations.length === 0 ? (
+              <p className="admin-approval-empty">No verified sign-ups are waiting for approval.</p>
+            ) : (
+              <div className="admin-table-wrap"><table><thead><tr><th>ORGANIZATION</th><th>CONTACT</th><th>TYPE</th><th>EMAIL</th><th>ACTION</th></tr></thead><tbody>
+                {registrations.map((registration) => <tr key={registration.id}><td><strong>{registration.organization}</strong></td><td>{registration.full_name}</td><td>{registration.account_type === "textile_supplier" ? "Factory / supplier" : registration.account_type.replace("_", " ")}</td><td>{registration.work_email}</td><td><button className="admin-primary admin-approve" onClick={() => handleApprove(registration)}>Approve</button></td></tr>)}
+              </tbody></table></div>
+            )}
+          </section>
           <div className="admin-directory">
             <div className="admin-directory-head"><div><h2>Network profiles</h2><p>Add real profiles manually; no sample data is preloaded.</p></div><label className="admin-search"><Search size={16} /><input placeholder="Search companies..." value={search} onChange={(event) => setSearch(event.target.value)} /></label></div>
             <div className="admin-tabs">{categories.map(([value, label]) => <button key={value} className={filter === value ? "selected" : ""} onClick={() => setFilter(value)}>{label}</button>)}</div>
@@ -265,7 +327,7 @@ function AdminDashboard({ initialCredentials = null, onExit }) {
       </section>
 
       {formOpen && <PortfolioModal form={form} setForm={setForm} editing={editing !== null} onClose={() => { setFormOpen(false); setEditing(null); }} onSubmit={handleSubmit} error={error} />}
-      {selected && <div className="admin-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelected(null); }}><article className="admin-modal admin-profile-modal"><button className="admin-modal-close" onClick={() => setSelected(null)} aria-label="Close"><X size={20} /></button><p className="admin-kicker">{categories.find(([key]) => key === selected.category)?.[1]}</p><h2>{selected.company_name}</h2><p className="admin-muted">{selected.country}</p><div className="admin-profile-grid"><span>Contact</span><strong>{selected.contact_name}</strong><span>Email</span><strong>{selected.work_email}</strong><span>Phone</span><strong>{selected.phone}</strong>{selected.website && <><span>Website</span><strong><a href={selected.website} target="_blank" rel="noreferrer"><Globe2 size={14} /> {selected.website}</a></strong></>}{selected.specialties && <><span>Specialties</span><strong>{selected.specialties}</strong></>}{selected.description && <><span>About</span><strong>{selected.description}</strong></>}</div><div className="admin-modal-actions"><button className="admin-secondary" onClick={() => startEdit(selected)}>Edit profile</button><button className="admin-danger" onClick={() => handleDelete(selected)}>Delete</button></div></article></div>}
+      {selected && <div className="admin-overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setSelected(null); }}><article className="admin-modal admin-profile-modal"><button className="admin-modal-close" onClick={() => setSelected(null)} aria-label="Close"><X size={20} /></button><p className="admin-kicker">{categories.find(([key]) => key === selected.category)?.[1]}</p><h2>{selected.company_name}</h2><p className="admin-muted">{selected.country}</p><div className="admin-profile-grid"><span>Contact</span><strong>{selected.contact_name}</strong><span>Email</span><strong>{selected.work_email}</strong><span>Phone</span><strong>{selected.phone}</strong>{selected.website && <><span>Website</span><strong><a href={selected.website} target="_blank" rel="noreferrer"><Globe2 size={14} /> {selected.website}</a></strong></>}{selected.specialties && <><span>Specialties</span><strong>{selected.specialties}</strong></>}{selected.description && <><span>About</span><strong>{selected.description}</strong></>}</div>{selected.source === "manual" && <div className="admin-modal-actions"><button className="admin-secondary" onClick={() => startEdit(selected)}>Edit profile</button><button className="admin-danger" onClick={() => handleDelete(selected)}>Delete</button></div>}</article></div>}
     </main>
   );
 }

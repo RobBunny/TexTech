@@ -229,6 +229,34 @@
   background: #fff;
 }
 
+.admin-approvals {
+  overflow: hidden;
+  margin-bottom: 20px;
+  border: 1px solid #e7eae4;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.admin-approval-empty {
+  margin: 0;
+  padding: 18px 22px;
+  border-top: 1px solid #edf0ec;
+  color: #858c85;
+  font-size: 11px;
+}
+
+.admin-approval-actions {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.admin-approve {
+  min-height: 32px;
+  padding: 0 11px;
+  font-size: 10px;
+}
+
 .admin-directory-head {
   display: flex;
   align-items: center;
