@@ -93,14 +93,37 @@ function clearResetFragment() {
 const RESET_REQUEST_NOTICE = "If an account exists for this email, a password-reset link may arrive. Check your inbox and spam folder.";
 
 function App() {
-  if (window.location.pathname === "/admin") {
-    return <AdminDashboard />;
+  const [path, setPath] = useState(window.location.pathname);
+  const [adminCredentials, setAdminCredentials] = useState(null);
+
+  useEffect(() => {
+    function handlePopState() {
+      setPath(window.location.pathname);
+      setAdminCredentials(null);
+    }
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  function showAdmin(credentials) {
+    window.history.pushState(null, "", "/admin");
+    setAdminCredentials(credentials);
+    setPath("/admin");
   }
 
-  return <SignupPage />;
+  function leaveAdmin() {
+    window.history.pushState(null, "", "/");
+    setAdminCredentials(null);
+    setPath("/");
+  }
+
+  return path === "/admin"
+    ? <AdminDashboard initialCredentials={adminCredentials} onExit={leaveAdmin} />
+    : <SignupPage onAdminAuthenticated={showAdmin} />;
 }
 
-function SignupPage() {
+function SignupPage({ onAdminAuthenticated }) {
   const [isSignup, setIsSignup] = useState(false);
   const [isForgotPassword, setIsForgotPassword] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
@@ -409,6 +432,13 @@ function SignupPage() {
         if (!stillCurrent()) return;
         if (typeof data.full_name !== "string" || !data.user_id) {
           throw new Error("Login confirmation missing");
+        }
+        if (accountType === "admin_authority") {
+          onAdminAuthenticated({
+            username: formData.email.trim(),
+            password: formData.password
+          });
+          return;
         }
         setMessage(`Welcome back, ${data.full_name}.`);
         setMessageType("success");

@@ -5,7 +5,7 @@ TexTech is a React frontend with a FastAPI and MongoDB backend.
 ## Run locally
 
 1. Install Python 3.10+ and Node.js.
-2. Copy `backend/.env.example` to `backend/.env` and set your MongoDB URI and a private admin username/password. Configure SMTP values to enable email verification and password-reset emails. Never commit `backend/.env`.
+2. Copy `backend/.env.example` to `backend/.env`, set your MongoDB URI, and replace `ADMIN_EMAILS` with the comma-separated email addresses allowed to create and use admin accounts. Configure SMTP values to enable email verification and password-reset emails. Never commit `backend/.env`.
 3. In a terminal:
 
    ```powershell
@@ -24,7 +24,7 @@ TexTech is a React frontend with a FastAPI and MongoDB backend.
    npm run dev
    ```
 
-5. Open `http://localhost:5173/admin` and sign in with `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+5. Register using an email in `ADMIN_EMAILS`, select the Admin / authority account type, and verify that email. Signing in with that account opens the admin dashboard; you can also open `http://localhost:5173/admin` directly.
    The registration form remains at `http://localhost:5173/`.
 
 The admin directory starts empty. Add actual buying houses, factories, and foreign buyers from the dashboard. Their portfolios are stored in MongoDB; no demo records are generated.

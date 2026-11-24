@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeft,
   Building2,
@@ -31,8 +31,13 @@ const categories = [
   ["foreign_buyer", "Foreign buyers"],
 ];
 
-function AdminDashboard() {
-  const [credentials, setCredentials] = useState(null);
+function basicAuthHeader(credentials) {
+  const bytes = new TextEncoder().encode(`${credentials.username}:${credentials.password}`);
+  return `Basic ${btoa(String.fromCharCode(...bytes))}`;
+}
+
+function AdminDashboard({ initialCredentials = null, onExit }) {
+  const [credentials, setCredentials] = useState(initialCredentials);
   const [login, setLogin] = useState({ username: "", password: "" });
   const [profiles, setProfiles] = useState([]);
   const [filter, setFilter] = useState("all");
@@ -42,11 +47,39 @@ function AdminDashboard() {
   const [formOpen, setFormOpen] = useState(false);
   const [selected, setSelected] = useState(null);
   const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(Boolean(initialCredentials));
 
   const authHeader = credentials
-    ? `Basic ${btoa(`${credentials.username}:${credentials.password}`)}`
+    ? basicAuthHeader(credentials)
     : "";
+
+  useEffect(() => {
+    if (!initialCredentials) return undefined;
+    let active = true;
+
+    async function loadInitialProfiles() {
+      try {
+        const response = await fetch(`${API_URL}/api/admin/portfolios`, {
+          headers: { Authorization: basicAuthHeader(initialCredentials) },
+        });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          throw new Error(body.detail || "Could not load profiles");
+        }
+        const data = await response.json();
+        if (active) setProfiles(data);
+      } catch (requestError) {
+        if (active) setError(requestError.message);
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    loadInitialProfiles();
+    return () => {
+      active = false;
+    };
+  }, [initialCredentials]);
 
   async function request(path, options = {}) {
     const response = await fetch(`${API_URL}${path}`, {
@@ -65,13 +98,13 @@ function AdminDashboard() {
   }
 
   async function loadProfiles(activeCredentials = credentials) {
-    if (!activeCredentials) return;
+    if (!activeCredentials) return false;
     setLoading(true);
     setError("");
     try {
       const response = await fetch(`${API_URL}/api/admin/portfolios`, {
         headers: {
-          Authorization: `Basic ${btoa(`${activeCredentials.username}:${activeCredentials.password}`)}`,
+          Authorization: basicAuthHeader(activeCredentials),
         },
       });
       if (!response.ok) {
@@ -79,8 +112,10 @@ function AdminDashboard() {
         throw new Error(body.detail || "Could not load profiles");
       }
       setProfiles(await response.json());
+      return true;
     } catch (requestError) {
       setError(requestError.message);
+      return false;
     } finally {
       setLoading(false);
     }
@@ -102,17 +137,21 @@ function AdminDashboard() {
     setError("");
     try {
       const nextCredentials = { ...login };
-      const response = await fetch(`${API_URL}/api/admin/portfolios`, {
-        headers: {
-          Authorization: `Basic ${btoa(`${nextCredentials.username}:${nextCredentials.password}`)}`,
-        },
+      const response = await fetch(`${API_URL}/api/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          work_email: nextCredentials.username,
+          password: nextCredentials.password,
+          account_type: "admin_authority",
+        }),
       });
-      if (response.ok) {
-        setProfiles(await response.json());
-        setCredentials(nextCredentials);
-      } else {
+      if (!response.ok) {
         const body = await response.json().catch(() => ({}));
-        setError(body.detail || "Sign-in failed");
+        throw new Error(body.detail || "Sign-in failed");
+      }
+      if (await loadProfiles(nextCredentials)) {
+        setCredentials(nextCredentials);
       }
     } catch (requestError) {
       setError(requestError.message || "Could not connect to the TexTech API");
@@ -175,8 +214,8 @@ function AdminDashboard() {
           <div className="admin-brand"><Layers3 size={22} /> TEXTECH <span>ADMIN</span></div>
           <p className="admin-kicker">PRIVATE WORKSPACE</p>
           <h1>Welcome back.</h1>
-          <p className="admin-muted">Sign in with the admin credentials configured by your team.</p>
-          <label>Username<input autoComplete="username" required value={login.username} onChange={(event) => setLogin({ ...login, username: event.target.value })} /></label>
+          <p className="admin-muted">Sign in with your verified admin-authority account.</p>
+          <label>Work email<input type="email" autoComplete="username" required value={login.username} onChange={(event) => setLogin({ ...login, username: event.target.value })} /></label>
           <label>Password<input type="password" autoComplete="current-password" required value={login.password} onChange={(event) => setLogin({ ...login, password: event.target.value })} /></label>
           {error && <p className="admin-error" role="alert">{error}</p>}
           <button className="admin-primary" type="submit">Sign in</button>
@@ -195,7 +234,7 @@ function AdminDashboard() {
         <a className="admin-nav" href="/"><ArrowLeft size={17} /> Registration page</a>
         <div className="admin-sidebar-bottom">
           <span>Admin workspace</span>
-          <button className="admin-logout" onClick={() => { setCredentials(null); setLogin({ username: "", password: "" }); }}><LogOut size={16} /> Sign out</button>
+          <button className="admin-logout" onClick={onExit}><LogOut size={16} /> Sign out</button>
         </div>
       </aside>
 

@@ -1,18 +1,20 @@
 """HTTP tests through an in-process ASGI harness; no sockets or real database."""
 import asyncio
+import base64
 import copy
 import json
+import os
 import unittest
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from pymongo.errors import ConnectionFailure, OperationFailure
 from email_verification import create_token_fields
 from test_signup_email_verification import load_main
 from test_email_verification import AtomicCollectionFake
 
 
-async def request(app, path, payload=None, *, method="POST", raw=None):
+async def request(app, path, payload=None, *, method="POST", raw=None, headers=None):
     body = raw if raw is not None else json.dumps(payload).encode()
     events = []
     received = False
@@ -27,9 +29,13 @@ async def request(app, path, payload=None, *, method="POST", raw=None):
     async def send(event):
         events.append(event)
 
+    request_headers = [(b"content-type", b"application/json")]
+    request_headers.extend(
+        (name.lower().encode(), value.encode()) for name, value in (headers or {}).items()
+    )
     scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
              "method": method, "scheme": "http", "path": path, "raw_path": path.encode(),
-             "query_string": b"", "root_path": "", "headers": [(b"content-type", b"application/json")],
+             "query_string": b"", "root_path": "", "headers": request_headers,
              "client": ("127.0.0.1", 1), "server": ("offline", 80)}
     await app(scope, receive, send)
     status = next(e["status"] for e in events if e["type"] == "http.response.start")
@@ -95,6 +101,61 @@ class VerificationRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_requests_have_one_success(self):
         results = await asyncio.gather(*(request(self.module.app, "/api/auth/verify-email", {"token": self.token}) for _ in range(2)))
         self.assertEqual(sorted(status for status, _ in results), [200, 400])
+
+
+class AdminPortfolioAuthTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        admin_emails = patch.dict(os.environ, {"ADMIN_EMAILS": "admin@example.com"})
+        admin_emails.start()
+        self.addCleanup(admin_emails.stop)
+        self.module = load_main()
+        self.password = "admin-password"
+        self.module.users_collection.find_one = AsyncMock(return_value={
+            "work_email": "admin@example.com",
+            "account_type": "admin_authority",
+            "email_verified": True,
+            "password_hash": self.module.password_hash.hash(self.password),
+        })
+        cursor = SimpleNamespace(sort=Mock(), to_list=AsyncMock(return_value=[]))
+        cursor.sort.return_value = cursor
+        self.module.portfolios_collection = SimpleNamespace(find=Mock(return_value=cursor))
+        token = base64.b64encode(f"admin@example.com:{self.password}".encode()).decode()
+        self.headers = {"authorization": f"Basic {token}"}
+
+    async def test_verified_admin_can_open_directory(self):
+        self.assertEqual(
+            await request(
+                self.module.app,
+                "/api/admin/portfolios",
+                method="GET",
+                headers=self.headers,
+            ),
+            (200, []),
+        )
+
+    async def test_non_admin_account_is_rejected(self):
+        self.module.users_collection.find_one.return_value["account_type"] = "buying_house"
+        self.assertEqual(
+            await request(
+                self.module.app,
+                "/api/admin/portfolios",
+                method="GET",
+                headers=self.headers,
+            ),
+            (401, {"detail": "Incorrect admin credentials"}),
+        )
+
+    async def test_unverified_admin_account_is_rejected(self):
+        self.module.users_collection.find_one.return_value["email_verified"] = False
+        self.assertEqual(
+            await request(
+                self.module.app,
+                "/api/admin/portfolios",
+                method="GET",
+                headers=self.headers,
+            ),
+            (401, {"detail": "Incorrect admin credentials"}),
+        )
 
 
 class LoginEnforcementTests(unittest.IsolatedAsyncioTestCase):

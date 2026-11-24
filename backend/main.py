@@ -1,6 +1,5 @@
 
 import os
-import secrets
 from contextlib import asynccontextmanager
 from typing import Literal
 
@@ -105,24 +104,42 @@ class PortfolioData(BaseModel):
     description: str = Field(default="", max_length=2000)
 
 
-def require_admin(credentials: HTTPBasicCredentials = Depends(basic_auth)):
-    username = os.getenv("ADMIN_USERNAME")
-    password = os.getenv("ADMIN_PASSWORD")
-    if not username or not password:
+def configured_admin_emails():
+    return {
+        email.strip().lower()
+        for email in os.getenv("ADMIN_EMAILS", "").split(",")
+        if email.strip()
+    }
+
+
+async def require_admin(credentials: HTTPBasicCredentials = Depends(basic_auth)):
+    email = credentials.username.strip().lower()
+    if email not in configured_admin_emails():
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect admin credentials",
+            headers={"WWW-Authenticate": "Basic"},
+        )
+    try:
+        user = await users_collection.find_one({"work_email": email})
+    except (ConnectionFailure, OperationFailure):
         raise HTTPException(
             status_code=503,
-            detail="Configure ADMIN_USERNAME and ADMIN_PASSWORD in backend/.env",
-        )
-    if not (
-        secrets.compare_digest(credentials.username, username)
-        and secrets.compare_digest(credentials.password, password)
+            detail="Admin authentication temporarily unavailable",
+        ) from None
+
+    if (
+        user is None
+        or user.get("account_type") != "admin_authority"
+        or user.get("email_verified") is not True
+        or not password_hash.verify(credentials.password, user["password_hash"])
     ):
         raise HTTPException(
             status_code=401,
             detail="Incorrect admin credentials",
             headers={"WWW-Authenticate": "Basic"},
         )
-    return credentials.username
+    return email
 
 
 def serialize_portfolio(portfolio):
@@ -146,6 +163,11 @@ async def health():
 @app.post("/api/auth/register", status_code=201)
 async def register(data: SignupData):
     email = str(data.work_email).lower()
+    if data.account_type == "admin_authority" and email not in configured_admin_emails():
+        raise HTTPException(
+            status_code=403,
+            detail="This email is not authorized to create an admin account",
+        )
 
     user = {
         "full_name": data.full_name.strip(),
